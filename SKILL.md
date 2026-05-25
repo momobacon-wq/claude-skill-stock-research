@@ -104,13 +104,19 @@ mcp__playwright__browser_click → 點建立
 
 ## 等待策略
 
-Deep Research 一批通常 5-10 分鐘,實測流程:
+Deep Research 一批的時間**高度依股票知名度而變**:
+- **小/中型股 (例如 7768 頌勝、6446 藥華藥、4966 譜瑞-KY)**: 5-10 分鐘
+- **超大型股 (台積電 2330、聯發科 2454、鴻海 2317、台達電 2308、聯電 2303、廣達 2382 等熱門權值股)**: **60-90 分鐘**;NotebookLM 的 deep research crawler 找到的網站數量是小型股的 8-10 倍,refinement 時間也大幅拉長
+
+正常流程:
 1. 送出 → 「規劃中…」 30-90s
-2. 「已完成 X/5 步驟」 → 「正在研究網站...」 3-8 分鐘
-3. 「正在分析結果...」 1-2 分鐘
+2. 「已完成 X/5 步驟」 → 「正在研究網站...」 — 小型股 3-8 分鐘,大型股 20-60 分鐘
+3. 「正在分析結果...」 — 小型股 1-2 分鐘,大型股 5-30 分鐘
 4. 「Deep Research 已完成!發現 X 個來源」+ 出現「匯入」按鈕
 
-**不要用 `mcp__playwright__browser_wait_for`** — 實測它對長 wait (>30s) 不可靠,常常提早回來。
+**進度文字會反覆跳,看似卡住但其實正常**: 步驟 2-3 之間,文字可能反覆切換「已完成 3 個步驟 (共 5 個)」↔「正在分析結果...」長達 20-40 分鐘 (尤其大型股)。**不要因此判定卡住而中斷**,只要「停止探索來源」按鈕還在就是 still running。真的卡住的特徵是 console error 暴增 + 進度文字完全靜止 >10 分鐘。
+
+**不要用 `mcp__playwright__browser_wait_for`** — 實測它對長 wait (>30s) 不可靠,常常提早回來 (約 50s 就 return)。
 
 **用 Bash run_in_background 等**:
 ```bash
@@ -118,7 +124,9 @@ sleep 480 && echo ready
 ```
 (`run_in_background: true`, `timeout: 600000`)
 
-收到 task notification 後再 snapshot 檢查。若還沒完成 (snapshot 沒「Deep Research 已完成」),再 sleep 180-240s 一次。
+收到 task notification 後再 snapshot 檢查。若還沒完成 (snapshot 沒「Deep Research 已完成」),再 sleep 180-300s 一次。**大型股要有耐心,連續 sleep 5-8 次都是正常範圍**。
+
+**忽略舊的 sleep 通知**: 跑大型股長 deep research 過程中,先前的 background sleep 會陸續完成 — 你會收到一連串「Background command X completed」通知,其中很多是過期的 (sleep 結束時 deep research 已經跑完了)。**收到通知後務必先 snapshot 看當前狀態,不要對舊通知無腦反應**;若狀態已是「Deep Research 已完成」,直接進匯入步驟即可。
 
 **SLEEP 注意**: 不要直接 `Bash sleep` 不開 run_in_background — 會被 sandbox 擋。一定要 `run_in_background: true`。
 
