@@ -130,6 +130,15 @@ sleep 480 && echo ready
 
 **SLEEP 注意**: 不要直接 `Bash sleep` 不開 run_in_background — 會被 sandbox 擋。一定要 `run_in_background: true`。
 
+**⚠️ Subagent vs 主 agent 等待模式不同 — 這是最容易踩雷的差異**:
+
+- **主 agent (直接 user 對話)**: 用 `Bash run_in_background: true` 後可以結束本 turn,harness 會在 sleep 完成時自動 fire 新 turn 把 notification 給你。這是預設模式。
+- **Subagent (被 `Agent` tool 起出來的)**: **絕對不可以**結束 turn 等通知! Subagent 結束 turn = subagent 整個任務終止,回給 parent。Parent 不會自動把 notification 餵回給已死的 subagent。
+  - 正確做法: 在**同一個 turn 內**用同步 Bash 等待 — `Bash sleep N` (不設 `run_in_background`、設 `timeout: 600000`),最多單次 sleep 10 分鐘。10 分鐘到了就 snapshot 檢查,沒完成再 sleep 一次,直到完成。
+  - 例: `Bash command="sleep 540 && echo ready" timeout=600000` 同步 block 9 分鐘,然後檢查 → 沒完成再下一次同步 sleep。
+  - 大型股 60-90 分鐘可能要連續 sleep 8-10 次,但都在同一個 turn 內。Subagent 必須跑完全部 8 批+dedup 才能 return。
+  - 如果你是被 `Agent` tool 起出來執行 stock-research 的 subagent,**忽略上面那段「結束 turn 等通知」的指引** — 那是給主 agent 看的。
+
 ## Batch 提示詞模板
 
 每個 prompt 中的 `{code}` 與 `{name}` 替換成股票代號與公司中文名。
