@@ -134,9 +134,13 @@ sleep 480 && echo ready
 
 - **主 agent (直接 user 對話)**: 用 `Bash run_in_background: true` 後可以結束本 turn,harness 會在 sleep 完成時自動 fire 新 turn 把 notification 給你。這是預設模式。
 - **Subagent (被 `Agent` tool 起出來的)**: **絕對不可以**結束 turn 等通知! Subagent 結束 turn = subagent 整個任務終止,回給 parent。Parent 不會自動把 notification 餵回給已死的 subagent。
-  - 正確做法: 在**同一個 turn 內**用同步 Bash 等待 — `Bash sleep N` (不設 `run_in_background`、設 `timeout: 600000`),最多單次 sleep 10 分鐘。10 分鐘到了就 snapshot 檢查,沒完成再 sleep 一次,直到完成。
-  - 例: `Bash command="sleep 540 && echo ready" timeout=600000` 同步 block 9 分鐘,然後檢查 → 沒完成再下一次同步 sleep。
-  - 大型股 60-90 分鐘可能要連續 sleep 8-10 次,但都在同一個 turn 內。Subagent 必須跑完全部 8 批+dedup 才能 return。
+  - 正確做法: 在**同一個 turn 內**用**同步、chunked while-loop** Bash 等待。**注意**: sandbox 會擋掉單發長 sleep — 連 `sleep 480` (不論有沒有 `run_in_background: true`) 都會被擋。**canonical 寫法**是 30s chunk 累加:
+    ```bash
+    i=0; while [ $i -lt 18 ]; do sleep 30; i=$((i+1)); done; echo done
+    ```
+    (這個會撐 9 分鐘。設 `timeout: 600000` 不開 `run_in_background`。)
+  - 9-10 分鐘到了就 snapshot 檢查,沒完成 (snapshot 沒「Deep Research 已完成」) 再下一輪 chunked while。
+  - 大型股 60-90 分鐘可能要連續 sleep 8-10 次,但都在同一個 turn 內。Subagent 必須跑完全部 batch + dedup 才能 return。
   - 如果你是被 `Agent` tool 起出來執行 stock-research 的 subagent,**忽略上面那段「結束 turn 等通知」的指引** — 那是給主 agent 看的。
 
 ## Batch 提示詞模板
@@ -186,13 +190,17 @@ sleep 480 && echo ready
 ## 已知陷阱
 
 1. **模式重置**: 第一批送出後 mode 可能回到 Fast Research。每批送出前都重新確認。
-2. **`browser_wait_for` 不可靠**: 對 >30s 的等待會提早 return,改用 Bash `sleep N && echo ready` + `run_in_background: true`。
+2. **`browser_wait_for` 不可靠**: 對 >30s 的等待會提早 return,改用上面 ## 等待策略 描述的同步/背景 sleep 方法。
 3. **`browser_type` 後 submit button 仍 disabled**: 罕見;若發生,改用 type 後 press_key Enter 或 re-snapshot 找新 ref。
 4. **Snapshot 很大 (常 80k+ tokens)**: 一律 `filename` 參數存檔,然後用 Grep 找關鍵字。常用 grep pattern:
    - `Deep Research 已完成|匯入|發現.*個來源|正在|步驟|disabled|textbox`
    - `提交.*ref|arrow_forward|Fast Research|Deep Research" \[ref`
 5. **沒登入 NotebookLM**: 第一次跑會跳 Google 登入頁,提示使用者「請去瀏覽器登入後告訴我 ok 再繼續」。
 6. **Deep Research 配額**: 每帳號每天有上限 (通常 ~10 次)。若跑到一半失敗顯示 quota,告訴使用者明天再跑剩下的批次。
+7. **textarea 在前批未匯入前 disabled**: 跑完 Batch N 的 Deep Research 後,**一定要先點「匯入」** Batch N 的結果,輸入框才會解除 disabled 讓你送 Batch N+1。不要還沒匯入就試圖打下一批 prompt。
+8. **NotebookLM 自動改 notebook 標題**: 匯入第一批後 NotebookLM 會根據 Deep Research 內容自動把筆記本標題從 "Untitled notebook" 改成主題標題 (例如「譜瑞-KY產品亮點與財務營運動態」)。**這是正常的,不用改回**。如果要客製化標題,告知使用者最後可以手動改。
+9. **少數 sources ingest 失敗 (silent)**: 偶有 source 無法匯入 (常見:paywalled 新聞、某些 PDF、需登入的網站)。Source list 不會顯示失敗 row,只是該篇直接消失。**對 source 總數 (final_count) 略低於 raw count 的情況不要驚慌**,不影響整體覆蓋。
+10. **批次間 source count 與 notebook 總數會不一致**: 個別 batch 報「找到 X 個 sources」加總,跟匯入後 notebook 的 source 總數常差 2-5 個 — NotebookLM 在匯入階段就會自動 dedupe 部分 cross-batch 重複。報告時以**匯入後的 notebook source count** 為準,而不是各批的 sum。
 
 ## 失敗與恢復
 
