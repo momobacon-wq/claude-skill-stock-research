@@ -68,16 +68,22 @@ mcp__playwright__browser_click → 點建立
 
 ### Step 3 — 對每個 batch 跑一輪
 
+**核心原則: 脆弱的 UI 動作一律走 `scripts/*.js`,不要手刻 `snapshot → grep → 找 ref → click`。**
+手動點擊每批要 6~10 個工具呼叫,呼叫越多越容易把 click 打成壞格式而卡在「匯入」。改用腳本後每批只剩 3~4 個穩定呼叫。
+
 對每個要跑的 batch (見 `## Batch 提示詞模板` 區段):
 
-1. 在輸入框 (`textbox "根據輸入的查詢內容，探索來源"`) `mcp__playwright__browser_type` 填入該 batch 的 prompt (替換 `{code}` 與 `{name}` 變數)
-2. 確認模式是 Deep Research (見 Step 2)
-3. Click `button "提交"` (送出後輸入框會 disabled、出現 progressbar「正在載入來源」/「規劃中…」)
-4. **背景等待 6-9 分鐘** (詳見 ## 等待策略),不要主動 poll
-5. 收到 task notification 後 snapshot,grep `"Deep Research 已完成"`
-   - 若還在跑(找不到「已完成」),snapshot 找「正在分析結果...」或「已完成 X/5 步驟」,再等 2-3 分鐘
-6. 找到「匯入」按鈕的 ref,click 匯入。Deep Research 報告 + 所有 sources (通常 10-40 個) 會進筆記本
-7. 更新 task list 該 batch 為 completed,下一 batch 進 in_progress
+1. **填 prompt**: 在輸入框 (`textbox "根據輸入的查詢內容，探索來源"`) 用 `mcp__playwright__browser_type` 填入該 batch 的 prompt (替換 `{code}` 與 `{name}`)。大段 prompt 維持用 type,不要塞進 JS (跳脫地獄)。
+2. **切模式 + 送出 (一支腳本)**: 跑 `scripts/submit-deep-research.js` (`browser_run_code_unsafe filename=...`)。它會自動偵測模式、是 Fast 就切回 Deep、再點「提交」,回傳 `{switchedToDeep, submitted, err}`。若 `submitted:false` 才 fallback 去 snapshot 找 ref。
+3. **背景等待 6-9 分鐘** (詳見 ## 等待策略),不要主動 poll。
+4. **檢查 + 匯入 (一支腳本)**: 收到 task notification 後跑 `scripts/check-and-import.js`。它一次完成「判斷是否已完成 → 若完成就點匯入」:
+   - 回傳 `{done:false, progress:"已完成 3/5 步驟"}` → 還在跑,再背景 sleep 一輪後重跑此腳本。
+   - 回傳 `{done:true, imported:true, sources:N}` → 該批匯入成功,記下 `sources` 數。
+   - 回傳 `{done:true, imported:false, err:...}` → banner 在但點擊失敗,直接再跑一次此腳本即可 (它內建 4 次重試,通常一次就過)。
+   - **不要再手動找「匯入」按鈕 ref 來點** — 那正是舊版卡在匯入的元兇。
+5. 更新 task list 該 batch 為 completed,下一 batch 進 in_progress。
+
+> 提示: 配合 `/goal 跑到結束不要停在匯入` 設一個 Stop hook,可在沒跑完 8 批+dedup 前擋住結束 turn,是最有效的「不要中途停」防呆。
 
 ### Step 4 — 全部跑完後,清重複 sources
 
@@ -189,7 +195,8 @@ sleep 480 && echo ready
 
 ## 已知陷阱
 
-1. **模式重置**: 第一批送出後 mode 可能回到 Fast Research。每批送出前都重新確認。
+0. **(最重要) 別手刻匯入/送出點擊**: 用 `scripts/submit-deep-research.js` 與 `scripts/check-and-import.js` (見 ## 腳本)。手動 `snapshot → grep → 找 ref → click 匯入` 是過去「每次卡在匯入」的根因 — 呼叫次數一多就容易把 click 打成壞格式,而且匯入剛好落在喚醒回合的起點特別顯眼。腳本用穩定 DOM selector + 內建重試,一發到位。
+1. **模式重置**: 第一批送出後 mode 可能回到 Fast Research。`submit-deep-research.js` 已自動處理 (偵測到 Fast 就切回 Deep);手動路徑才需每批重新確認。
 2. **`browser_wait_for` 不可靠**: 對 >30s 的等待會提早 return,改用上面 ## 等待策略 描述的同步/背景 sleep 方法。
 3. **`browser_type` 後 submit button 仍 disabled**: 罕見;若發生,改用 type 後 press_key Enter 或 re-snapshot 找新 ref。
 4. **Snapshot 很大 (常 80k+ tokens)**: 一律 `filename` 參數存檔,然後用 Grep 找關鍵字。常用 grep pattern:
@@ -208,12 +215,17 @@ sleep 480 && echo ready
 - **匯入按鈕沒出現**: 再等 60s 後 snapshot;還是沒有就 click 「查看來源」展開,改用「全部加入」之類的替代路徑。
 - **使用者中途想改方向**: 隨時可以中斷,已完成的 batch 都已 import 到筆記本不會消失。
 
-## Dedup 腳本
+## 腳本
 
-`scripts/dedup-sources.js` 是 Playwright async function,用法:
-```
-mcp__playwright__browser_run_code_unsafe code=<貼整個檔案內容>
-```
+三支腳本都是 Playwright async function,一律用 `mcp__playwright__browser_run_code_unsafe filename=<路徑>` 跑 (用 `filename` 比貼整段 `code` 乾淨)。共同設計哲學: 只用穩定 DOM selector (`.single-source-container`、`source-item-more-button-<uuid>`、`getByRole`),不依賴會變動的 aria ref,並內建重試。
+
+| 腳本 | 何時跑 | 回傳 |
+|---|---|---|
+| `submit-deep-research.js` | 每批 `browser_type` 填完 prompt 後 | `{switchedToDeep, submitted, err}` — 自動切 Deep + 點提交 |
+| `check-and-import.js` | 每批背景等待後 | `{done, progress}` 或 `{done:true, imported, sources}` — 判斷完成並匯入 |
+| `dedup-sources.js` | 8 批全匯入後 | `{summary, dupGroups, finalSourceCount}` — 清重複 |
+
+### dedup-sources.js
 
 它會:
 1. 偵測所有 source 的 aria-label,group by title
