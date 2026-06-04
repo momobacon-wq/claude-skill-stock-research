@@ -68,8 +68,29 @@ const dataSecs = sections.filter(s => s.kind === 'data');
 const overview = sections.find(s => s.kind === 'overview');
 const health = sections.find(s => s.kind === 'health');
 
-let md = `# ${name} ${code} 財報狗完整財務資料\n\n`;
-md += `> 資料來源：財報狗 statementdog.com。所有數字為擷取當日網站數據，含完整歷史。\n`;
+// Freshness marker = latest 月營收 period found anywhere in the data tables (e.g. "2026-04").
+// Embedded in filename + H1 so a later run can read it off the NotebookLM source title and
+// decide whether the notebook's 財報狗 source is stale vs statementdog's current latest month.
+function latestPeriod(secs) {
+  let best = null;
+  for (const s of secs) {
+    if (s.kind !== 'data') continue;
+    for (const tab of (s.tabs || [])) {
+      for (const row of (tab.table || [])) {
+        for (const cell of row) {
+          const m = String(cell).match(/^(\d{4})\/(\d{1,2})$/);
+          if (m) { const key = m[1] + '-' + m[2].padStart(2, '0'); if (!best || key > best) best = key; }
+        }
+      }
+    }
+  }
+  return best;
+}
+const period = latestPeriod(sections);
+const periodTag = period || 'latest';
+
+let md = `# ${name} ${code} 財報狗完整財務資料（資料截至 ${period || '未知'}）\n\n`;
+md += `> 資料來源：財報狗 statementdog.com。所有數字為擷取當日網站數據，含完整歷史，最新資料月份 ${period || '未知'}。\n`;
 md += `> 本檔為結構化量化財務數據，與本筆記本的 Deep Research 質化報告互補。\n\n---\n\n`;
 if (overview) md += overviewMd(overview) + '\n---\n\n';
 if (health) md += healthMd(health) + '\n---\n\n';
@@ -78,6 +99,7 @@ for (const d of dataSecs) md += dataMd(d) + '\n---\n\n';
 const dir = path.join(os.homedir(), 'statementdog_work', code);
 fs.mkdirSync(dir, { recursive: true });
 const safe = name.replace(/[\\/:*?"<>|]/g, '');
-const out = path.join(dir, `${safe}_${code}_財報狗.md`);
+// period in filename → shows up as the NotebookLM source title for freshness checks
+const out = path.join(dir, `${safe}_${code}_財報狗_${periodTag}.md`);
 fs.writeFileSync(out, md, 'utf8');
-console.log('wrote', out, Math.round(md.length / 1024) + 'KB', md.split('\n').length + ' lines');
+console.log('wrote', out, Math.round(md.length / 1024) + 'KB', md.split('\n').length + ' lines', '| period:', period || 'unknown');

@@ -1,6 +1,6 @@
 ---
 name: stock-research
-description: 用 NotebookLM Deep Research 對台股(或任何上市公司)做多面向深度研究 — 新增筆記本、跑 8 批主題深度研究 (公司基本面/財務展望/護城河/風險/技術/ESG/經營團隊/季報)、批次匯入 sources、自動清重複,最後給筆記本連結。台股還會(預設)先抓財報狗(statementdog)全部結構化財務數據(數十個指標表、含全歷史:損益/資產/負債/現金流/三率/估值河流圖/股利/籌碼/產品組合等)轉成 Markdown 上傳當來源,給筆記本一份精確量化基礎與 Deep Research 質化報告互補。**也是 `/stock-research` 斜線指令的完整實作**(`/stock-research 7768 頌勝科技` 會走這個 skill)。Trigger 詞包括:「研究 X 股票」、「deep research 2330 台積電」、「幫我用 notebooklm 研究 X」、「stock research X」、「`/stock-research` <code> <name>」、「研究這檔股票」、「幫我深度研究 X 公司」。使用者通常會給股票代號 + 公司名,可能再加上想聚焦的子主題 (例如「只跑風險和財報」)。整個流程約 1-1.5 小時(8 批 × 5-10 分鐘 deep research),會主動用背景 sleep 等待,不會無謂 polling。
+description: 用 NotebookLM Deep Research 對台股(或任何上市公司)做多面向深度研究 — 新增筆記本、跑 8 批主題深度研究 (公司基本面/財務展望/護城河/風險/技術/ESG/經營團隊/季報)、批次匯入 sources、自動清重複,最後給筆記本連結。台股還會(預設)先抓財報狗(statementdog)全部結構化財務數據(數十個指標表、含全歷史:損益/資產/負債/現金流/三率/估值河流圖/股利/籌碼/產品組合等)轉成 Markdown 上傳當來源,給筆記本一份精確量化基礎與 Deep Research 質化報告互補。**開工前會先檢查 NotebookLM 是否已有對應筆記本,有就沿用:財報狗資料過期才重撈並刪舊、Deep Research 沒跑過才跑,省時省配額。** **也是 `/stock-research` 斜線指令的完整實作**(`/stock-research 7768 頌勝科技` 會走這個 skill)。Trigger 詞包括:「研究 X 股票」、「deep research 2330 台積電」、「幫我用 notebooklm 研究 X」、「stock research X」、「`/stock-research` <code> <name>」、「研究這檔股票」、「幫我深度研究 X 公司」。使用者通常會給股票代號 + 公司名,可能再加上想聚焦的子主題 (例如「只跑風險和財報」)。整個流程約 1-1.5 小時(8 批 × 5-10 分鐘 deep research),會主動用背景 sleep 等待,不會無謂 polling。
 argument-hint: <股票代號> <公司名> [batches=all|basic,fin,...] [statementdog=on|off]
 ---
 
@@ -45,7 +45,29 @@ argument-hint: <股票代號> <公司名> [batches=all|basic,fin,...] [statement
 
 建立 task list (TaskCreate) — 1 個「財報狗數據」task (台股) + 每批 1 個 task + 1 個「dedup」task。
 
-### Step 1 — 開 NotebookLM 新筆記本
+### Step 0.5 — 前置判斷:沿用既有筆記本，只補缺的（最重要的省時/省配額步驟）
+
+**目的**: 同一檔股票可能之前已經研究過。開工前先檢查 NotebookLM 是否已有對應筆記本 — 有的話就沿用，**財報狗資料過期才重撈（並刪舊）、Deep Research 沒跑過才跑**，避免重複燒 Deep Research 配額。
+
+1. **找筆記本**: `browser_navigate` 到 `https://notebooklm.google.com/` → 跑 `scripts/find-notebook.js`，拿到 `{notebooks:[{id,title}]}`。在 title 裡用**股票代號(如 `1514`) 或 公司名(如 `亞力`)** 比對。
+   - **比對不到** → 沒有既有筆記本，走原流程：Step 1 新建 → Step 1.5 財報狗 → Step 2-4 全部跑。
+   - **比對到多本** → 選 title 最貼近本研究的那本（通常含代號或完整公司名）；不確定就用 AskUserQuestion 問使用者。
+   - 注意：有些舊筆記本標題沒有代號（例如「宜鼎國際：邊緣AI…」沒有 5289），所以**代號和公司名都要試**。
+2. **比對到 → 沿用**: 設定 `notebookUrl = https://notebooklm.google.com/notebook/<id>`（**跳過 Step 1 新建**）。開啟它，跑 `scripts/notebook-source-audit.js`，拿到 `{financialSources, latestFinancialPeriod, hasDeepResearch}`。
+3. **財報狗新鮮度判斷**（台股）:
+   - 取財報狗當前最新月份（便宜，不用整包抓）：`browser_navigate` 到 `https://statementdog.com/analysis/<code>/monthly-revenue`，讀頁面 `<title>`，用 `/(\d{4})年(\d{1,2})月營收/` 解析出 `curPeriod`（例如 `2026年4月` → `2026-04`，月份補零）。
+   - **若 `latestFinancialPeriod` 為 null（舊檔沒有月份標記）或 < `curPeriod`（過期）** → 更新：
+     a. 跑 `scripts/delete-old-statementdog.js` 刪掉舊的財報狗 `.md`（**只刪結尾 `.md` 的我方上傳檔，不會動到 Deep Research 爬到的財報狗新聞頁**）。
+     b. 走 **Step 1.5** 重新抓 → 轉 → 上傳（新檔名含月份標記 `_YYYY-MM`，下次才比得出來）。
+   - **若 `latestFinancialPeriod === curPeriod`（已是最新）** → 跳過財報狗，不動。
+4. **Deep Research 判斷**:
+   - **`hasDeepResearch === true`**（既有筆記本已有 ≥5 個非財報狗來源）→ **跳過全部 8 批 + dedup**（Step 2、3、4 全略過）。
+   - 否則 → 照常跑 Step 2-3 八批 + Step 4 dedup。
+5. **報告**：明確告訴使用者「沿用既有筆記本 / 財報狗已更新到 YYYY-MM（或已是最新略過） / Deep Research 已存在略過（或本次補跑）」。
+
+> 一句話流程：**找到本** → 財報狗舊就換新、Deep Research 有就不跑；**找不到本** → 全新跑。
+
+### Step 1 — 開 NotebookLM 新筆記本（僅在 Step 0.5 找不到既有筆記本時）
 
 ```
 mcp__playwright__browser_navigate → https://notebooklm.google.com
@@ -233,7 +255,8 @@ sleep 480 && echo ready
 11. **(財報狗 Step 1.5) 沒登入 / 非台股 → tabCount 多為 0**: `scrape-statementdog.js` 回傳的 `sections` 裡若 `tabCount` 普遍 0 或極低,代表瀏覽器沒登入財報狗(只拿得到公開的少量資料)或這檔不是台股(財報狗沒有該頁)。提示使用者登入付費帳號後重跑此步,或直接 `statementdog=off` 跳過、只跑 Deep Research。
 12. **(財報狗 Step 1.5) `run_code_unsafe` 沒有 `require`**: 不要在抓取腳本裡用 `fs`/`require` — 沙箱會丟 `require is not defined`。落地一律走「localStorage `__SD` → browser_evaluate `filename` dump → node convert」三段式。`browser_evaluate` 的 `filename` 只能存 basename 到 home 目錄(不能帶子路徑)。
 13. **(批次間最重要) 匯入後研究框會被「來源處理中」鎖住 `readonly`**: 每批 `check-and-import` 匯入成功後,NotebookLM 會在剛匯入的那批 sources **背景處理(ingest)完成前**,把 `source-discovery-query-box textarea` 設成 `readonly=true`、把「網路」corpus 鈕設成 `disabled` — 整個研究面板鎖住,**不是 `disabled` 而是 `readonly`**(所以只檢查 `.disabled` 會誤判成可用)。**送下一批前務必**: (a) `browser_navigate` 到 `?addSource=true`,(b) 用 `browser_evaluate` 輪詢 `document.querySelector('source-discovery-query-box textarea').readOnly === false` 直到解鎖(來源多時要 3-5 分鐘,背景 sleep 後重開再輪詢),(c) 解鎖後才 `browser_type` 填 prompt。沒等解鎖就 type 會 timeout(element is not editable)。注意:這個鎖跟 trap #7 的「前批未匯入→textarea disabled」是兩回事,#13 是「已匯入但 sources 還在 ingest」。
-14. **(dedup) 跑 `dedup-sources.js` 前要先切到「來源」分頁**: dedup 靠 `.single-source-container` 抓 source list,但頁面預設停在「對話」分頁時這些容器不在 DOM,腳本會回傳 `initialSources:0` 什麼都沒刪。先 `browser_evaluate` 點「來源」tab(`[role=tab]` 或 button 文字 `^來源$`)、等 ~2.5s 讓清單渲染(確認 `.single-source-container` 數量 > 0)再跑 dedup。
+14. **(dedup) 跑 `dedup-sources.js` 前要先切到「來源」分頁**: dedup 靠 `.single-source-container` 抓 source list,但頁面預設停在「對話」分頁時這些容器不在 DOM,腳本會回傳 `initialSources:0` 什麼都沒刪。先 `browser_evaluate` 點「來源」tab(`[role=tab]` 或 button 文字 `^來源$`)、等 ~2.5s 讓清單渲染(確認 `.single-source-container` 數量 > 0)再跑 dedup。(`notebook-source-audit.js`、`delete-old-statementdog.js` 已內建切分頁。)
+15. **(Step 0.5 關鍵) 「我方財報狗 `.md`」vs「Deep Research 爬到的財報狗新聞頁」要分清楚**: Deep Research 常會抓到 statementdog.com 的個股新聞/數據頁,**它們的標題也含「財報狗」**(例如「亞力(1514)2026年第1季EPS為0.73元 - 財報狗」)。判斷/刪除我方上傳的財報狗主檔時**只能比對結尾 `.md`** 的標題(`/財報狗(_\d{4}-\d{2})?\.md$/`),否則 `delete-old-statementdog.js` 會誤刪一堆 Deep Research 來源。新鮮度月份標記也是從 `財報狗_YYYY-MM.md` 檔名解析(`convert-statementdog.js` 會把最新月營收月份寫進檔名與 H1);舊版上傳檔沒有月份標記 → `period:null` → 一律當過期重抓(可接受,重抓後就有標記)。
 
 ## 失敗與恢復
 
@@ -247,6 +270,9 @@ sleep 480 && echo ready
 
 | 腳本 | 何時跑 | 回傳 |
 |---|---|---|
+| `find-notebook.js` | Step 0.5,在 NotebookLM 首頁 | `{notebooks:[{id,title}]}` — 列出已載入筆記本供代號/名稱比對 |
+| `notebook-source-audit.js` | Step 0.5,開啟既有筆記本後 | `{financialSources:[{id,title,period}], latestFinancialPeriod, otherSourceCount, hasDeepResearch}` — 判斷財報狗新鮮度與是否已跑 Deep Research |
+| `delete-old-statementdog.js` | Step 0.5,財報狗過期、上傳新檔前 | `{attempted, deleted}` — 刪掉舊的財報狗 `.md`(只刪我方上傳檔) |
 | `scrape-statementdog.js` | Step 1.5,先 navigate 到 `statementdog.com/analysis/<code>/monthly-revenue` 後 | `{code, sections:[{section,tabCount}], stored:true}` — 一次抓完 10 頁存進 `localStorage['__SD']` |
 | `convert-statementdog.js` | Step 1.5,dump `__SD` 到 `sd_<code>.json` 後 (用 `node` 跑,非 Playwright) | 印出主檔路徑 — 確定性把 raw → `~/statementdog_work/<code>/<name>_<code>_財報狗.md`(數字零失真) |
 | `submit-deep-research.js` | 每批 `browser_type` 填完 prompt 後 | `{switchedToDeep, submitted, err}` — 自動切 Deep + 點提交 |
