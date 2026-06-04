@@ -72,16 +72,29 @@ const health = sections.find(s => s.kind === 'health');
 // Embedded in filename + H1 so a later run can read it off the NotebookLM source title and
 // decide whether the notebook's 財報狗 source is stale vs statementdog's current latest month.
 function latestPeriod(secs) {
+  const scanHeader = header => {
+    let best = null;
+    for (const cell of (header || [])) {
+      const m = String(cell).match(/^(\d{4})\/(\d{1,2})$/);
+      if (m) { const key = m[1] + '-' + m[2].padStart(2, '0'); if (!best || key > best) best = key; }
+    }
+    return best;
+  };
+  // Prefer 財務報表 → 每月營收 header — that is the 月營收 month, which is what the cheap
+  // freshness check reads from the monthly-revenue page <title>. Other tables (估值河流圖)
+  // use STOCK-PRICE months that can be 1 month ahead of revenue and would skew the marker.
+  for (const s of secs) {
+    if (s.kind !== 'data' || s.section !== '財務報表') continue;
+    for (const tab of (s.tabs || [])) {
+      if (tab.name === '每月營收') { const p = scanHeader(tab.table && tab.table[0]); if (p) return p; }
+    }
+  }
+  // fallback: max month-like token anywhere
   let best = null;
   for (const s of secs) {
     if (s.kind !== 'data') continue;
-    for (const tab of (s.tabs || [])) {
-      for (const row of (tab.table || [])) {
-        for (const cell of row) {
-          const m = String(cell).match(/^(\d{4})\/(\d{1,2})$/);
-          if (m) { const key = m[1] + '-' + m[2].padStart(2, '0'); if (!best || key > best) best = key; }
-        }
-      }
+    for (const tab of (s.tabs || [])) for (const row of (tab.table || [])) {
+      const p = scanHeader(row); if (p && (!best || p > best)) best = p;
     }
   }
   return best;
