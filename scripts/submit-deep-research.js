@@ -17,11 +17,18 @@ async (page) => {
   // The mode button's label IS the current mode. If it says Fast, switch to Deep.
   try {
     const modeBtn = page.getByRole('button', { name: /^(Fast|Deep) Research$/ }).first();
-    const label = (await modeBtn.innerText({ timeout: 3000 })).trim();
-    if (label.startsWith('Fast')) {
+    // NOTE: innerText includes a leading icon ligature (e.g. "search_spark Fast Research
+    // keyboard_arrow_down"), so startsWith('Fast') NEVER matches. Detect by substring instead:
+    // switch only when the label contains "Fast Research" and NOT "Deep Research".
+    const label = (await modeBtn.innerText({ timeout: 3000 })).replace(/\s+/g, ' ').trim();
+    if (label.includes('Fast Research') && !label.includes('Deep Research')) {
       await modeBtn.click({ timeout: 5000 });
       await page.waitForTimeout(450);
-      await page.getByRole('menuitem', { name: 'Deep Research 深度報告和結果' }).click({ timeout: 5000 });
+      try {
+        await page.getByRole('menuitem', { name: 'Deep Research 深度報告和結果' }).click({ timeout: 5000 });
+      } catch (e) {
+        await page.getByRole('menuitem', { name: /Deep Research/ }).first().click({ timeout: 5000 });
+      }
       await page.waitForTimeout(450);
       switchedToDeep = true;
     }
