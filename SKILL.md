@@ -1,7 +1,7 @@
 ---
 name: stock-research
-description: 用 NotebookLM Deep Research 對台股(或任何上市公司)做多面向深度研究 — 新增筆記本、跑 8 批主題深度研究 (公司基本面/財務展望/護城河/風險/技術/ESG/經營團隊/季報)、批次匯入 sources、自動清重複,最後給筆記本連結。**也是 `/stock-research` 斜線指令的完整實作**(`/stock-research 7768 頌勝科技` 會走這個 skill)。Trigger 詞包括:「研究 X 股票」、「deep research 2330 台積電」、「幫我用 notebooklm 研究 X」、「stock research X」、「`/stock-research` <code> <name>」、「研究這檔股票」、「幫我深度研究 X 公司」。使用者通常會給股票代號 + 公司名,可能再加上想聚焦的子主題 (例如「只跑風險和財報」)。整個流程約 1-1.5 小時(8 批 × 5-10 分鐘 deep research),會主動用背景 sleep 等待,不會無謂 polling。
-argument-hint: <股票代號> <公司名> [batches=all|basic,fin,...]
+description: 用 NotebookLM Deep Research 對台股(或任何上市公司)做多面向深度研究 — 新增筆記本、跑 8 批主題深度研究 (公司基本面/財務展望/護城河/風險/技術/ESG/經營團隊/季報)、批次匯入 sources、自動清重複,最後給筆記本連結。台股還會(預設)先抓財報狗(statementdog)全部結構化財務數據(數十個指標表、含全歷史:損益/資產/負債/現金流/三率/估值河流圖/股利/籌碼/產品組合等)轉成 Markdown 上傳當來源,給筆記本一份精確量化基礎與 Deep Research 質化報告互補。**也是 `/stock-research` 斜線指令的完整實作**(`/stock-research 7768 頌勝科技` 會走這個 skill)。Trigger 詞包括:「研究 X 股票」、「deep research 2330 台積電」、「幫我用 notebooklm 研究 X」、「stock research X」、「`/stock-research` <code> <name>」、「研究這檔股票」、「幫我深度研究 X 公司」。使用者通常會給股票代號 + 公司名,可能再加上想聚焦的子主題 (例如「只跑風險和財報」)。整個流程約 1-1.5 小時(8 批 × 5-10 分鐘 deep research),會主動用背景 sleep 等待,不會無謂 polling。
+argument-hint: <股票代號> <公司名> [batches=all|basic,fin,...] [statementdog=on|off]
 ---
 
 # Stock Deep Research (NotebookLM)
@@ -38,11 +38,12 @@ argument-hint: <股票代號> <公司名> [batches=all|basic,fin,...]
 
 開工前先告訴使用者:
 - 確認 code + name
+- (台股) 會先抓財報狗結構化財務數據上傳 (Step 1.5,~2 分鐘);非台股或 `statementdog=off` 則略過
 - 列出將跑哪幾批 (預設 8 批)
 - 預估時間 ~1-1.5 小時 (8 批 × 5-10 分鐘 deep research + 匯入時間)
 - 若使用者趕時間,建議只跑核心 2-3 批 (`basic,fin,risk` 是必看)
 
-建立 task list (TaskCreate) — 每批 1 個 task,加 1 個「dedup」task。
+建立 task list (TaskCreate) — 1 個「財報狗數據」task (台股) + 每批 1 個 task + 1 個「dedup」task。
 
 ### Step 1 — 開 NotebookLM 新筆記本
 
@@ -55,6 +56,24 @@ mcp__playwright__browser_click → 點建立
 若 snapshot 結果太大會被存檔,grep 找 `"建立新的筆記本"` 即可拿 ref。
 
 預期跳到 `https://notebooklm.google.com/notebook/<uuid>?addSource=true`,輸入框 placeholder 是「在網路上搜尋新來源」。
+
+### Step 1.5 — 匯入財報狗結構化財務數據 (台股預設 ON,`statementdog=off` 可跳過)
+
+**目的**: 在跑質化的 Deep Research 前,先把財報狗(statementdog.com)的**精確量化財務數據**(數十個指標表、含全歷史) 抓成一份 Markdown 上傳當來源,讓筆記本同時有「硬數字」與「Deep Research 質化分析」。**只適用台股**(美股/海外非台股自動跳過此步)。
+
+**前置**: 瀏覽器需登入財報狗(**付費帳號才解鎖完整歷史**;沒登入仍可抓到部分)。若 Step 1.5 跑出來各 section 的 `tabCount` 多為 0,多半是沒登入或非台股 → 提示使用者登入後重跑,或直接跳過繼續 Deep Research。
+
+**核心原則 (同 Deep Research 步驟): 脆弱的多頁抓取一律走 `scripts/scrape-statementdog.js`,不要手刻 navigate+evaluate ×20。** 數字一律由腳本確定性搬運,**絕不讓 LLM 重打數字**(避免幻覺竄改財報)。
+
+1. **抓取 (1 個 run_code 呼叫)**:
+   - 先 `browser_navigate` 到 `https://statementdog.com/analysis/<code>/monthly-revenue` (腳本從 URL 讀 code)。
+   - 跑 `scripts/scrape-statementdog.js` (`browser_run_code_unsafe filename=...`)。它一次走訪 8 個資料分頁(每頁點過所有 `li.sub-menu-list-item-link` 指標子分頁,自動處理 `<table>` 與股利政策那種 `<div>` 格狀「詳細數據」頁)+ 最新動態 + 股票健診,把完整 payload 存進財報狗網域的 `localStorage['__SD']`,回傳 `{code, sections:[{section,tabCount}], stored:true}`。
+2. **Dump 到磁碟 (1 個 evaluate 呼叫)**: `browser_evaluate` `function: () => localStorage.getItem('__SD')`, `filename: sd_<code>.json` (存到 home 目錄)。
+3. **轉成主檔 Markdown (1 個 node 呼叫)**: `node ~/.claude/skills/stock-research/scripts/convert-statementdog.js <code> "<name>" <sd_<code>.json 的實際路徑>`。確定性轉換(寬時間序列自動轉置成期間為列),輸出 `~/statementdog_work/<code>/<name>_<code>_財報狗.md` (約 70-90KB)。
+4. **上傳到筆記本當來源**: 回 NotebookLM 該筆記本 → 來源分頁 → **新增來源** → **上傳檔案** → `browser_file_upload` 丟上一步的 `.md` 路徑。等幾秒確認來源清單出現該檔(類型 markdown、無錯誤)。
+5. (選用,需使用者同意才跑 Workflow) 想要更厚的洞見,可用 `Workflow` 對各 section 並行寫「重點解讀」+ 一份「投資總覽摘要」再一起上傳;預設不做,維持輕量、數字確定性。
+
+完成後再進 Step 2 開始 Deep Research(財報狗來源不佔 Deep Research 配額)。
 
 ### Step 2 — 切到 Deep Research 模式
 
@@ -96,6 +115,8 @@ mcp__playwright__browser_click → 點建立
 格式:
 ```
 ✅ 完成: <code> <name> Deep Research
+
+財報狗結構化財務數據: ✅ 已上傳 <name>_<code>_財報狗.md (NN 個指標表/全歷史)  ← 台股才有
 
 8 批 Deep Research 報告:
 | Batch | 主題 | 原始來源數 |
@@ -208,6 +229,8 @@ sleep 480 && echo ready
 8. **NotebookLM 自動改 notebook 標題**: 匯入第一批後 NotebookLM 會根據 Deep Research 內容自動把筆記本標題從 "Untitled notebook" 改成主題標題 (例如「譜瑞-KY產品亮點與財務營運動態」)。**這是正常的,不用改回**。如果要客製化標題,告知使用者最後可以手動改。
 9. **少數 sources ingest 失敗 (silent)**: 偶有 source 無法匯入 (常見:paywalled 新聞、某些 PDF、需登入的網站)。Source list 不會顯示失敗 row,只是該篇直接消失。**對 source 總數 (final_count) 略低於 raw count 的情況不要驚慌**,不影響整體覆蓋。
 10. **批次間 source count 與 notebook 總數會不一致**: 個別 batch 報「找到 X 個 sources」加總,跟匯入後 notebook 的 source 總數常差 2-5 個 — NotebookLM 在匯入階段就會自動 dedupe 部分 cross-batch 重複。報告時以**匯入後的 notebook source count** 為準,而不是各批的 sum。
+11. **(財報狗 Step 1.5) 沒登入 / 非台股 → tabCount 多為 0**: `scrape-statementdog.js` 回傳的 `sections` 裡若 `tabCount` 普遍 0 或極低,代表瀏覽器沒登入財報狗(只拿得到公開的少量資料)或這檔不是台股(財報狗沒有該頁)。提示使用者登入付費帳號後重跑此步,或直接 `statementdog=off` 跳過、只跑 Deep Research。
+12. **(財報狗 Step 1.5) `run_code_unsafe` 沒有 `require`**: 不要在抓取腳本裡用 `fs`/`require` — 沙箱會丟 `require is not defined`。落地一律走「localStorage `__SD` → browser_evaluate `filename` dump → node convert」三段式。`browser_evaluate` 的 `filename` 只能存 basename 到 home 目錄(不能帶子路徑)。
 
 ## 失敗與恢復
 
@@ -221,9 +244,17 @@ sleep 480 && echo ready
 
 | 腳本 | 何時跑 | 回傳 |
 |---|---|---|
+| `scrape-statementdog.js` | Step 1.5,先 navigate 到 `statementdog.com/analysis/<code>/monthly-revenue` 後 | `{code, sections:[{section,tabCount}], stored:true}` — 一次抓完 10 頁存進 `localStorage['__SD']` |
+| `convert-statementdog.js` | Step 1.5,dump `__SD` 到 `sd_<code>.json` 後 (用 `node` 跑,非 Playwright) | 印出主檔路徑 — 確定性把 raw → `~/statementdog_work/<code>/<name>_<code>_財報狗.md`(數字零失真) |
 | `submit-deep-research.js` | 每批 `browser_type` 填完 prompt 後 | `{switchedToDeep, submitted, err}` — 自動切 Deep + 點提交 |
 | `check-and-import.js` | 每批背景等待後 | `{done, progress}` 或 `{done:true, imported, sources}` — 判斷完成並匯入 |
 | `dedup-sources.js` | 8 批全匯入後 | `{summary, dupGroups, finalSourceCount}` — 清重複 |
+
+### scrape-statementdog.js / convert-statementdog.js (財報狗結構化數據,見 Step 1.5)
+
+- `scrape-statementdog.js` 是 Playwright `run_code_unsafe` 腳本,**該沙箱沒有 `require`/fs**,所以它把結果存進財報狗網域 `localStorage['__SD']`,再由一支 `browser_evaluate` (`() => localStorage.getItem('__SD')`, `filename: sd_<code>.json`) dump 到磁碟。
+- 抓取細節:每個大分頁的指標子分頁是 `li.sub-menu-list-item-link`(`selected` 為現用),JS `click()` 切換;多數頁是 `<table>`(指標為列、期間為欄),少數(如股利政策)是 `<div>` 格狀需先點「詳細數據」分頁;**切忌用過廣選擇器點到導覽列「個股」會跳走到 2330**。
+- `convert-statementdog.js` 是 **node** 腳本(用 Bash 跑,不是 Playwright):`node convert-statementdog.js <code> "<name>" <sd_json路徑>`;寬表(cols>rows)自動轉置成期間為列,輸出單一主檔。
 
 ### dedup-sources.js
 
