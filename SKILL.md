@@ -101,12 +101,13 @@ mcp__playwright__browser_click → 點建立
    - 回傳 `{done:true, imported:false, err:...}` → banner 在但點擊失敗,直接再跑一次此腳本即可 (它內建 4 次重試,通常一次就過)。
    - **不要再手動找「匯入」按鈕 ref 來點** — 那正是舊版卡在匯入的元兇。
 5. 更新 task list 該 batch 為 completed,下一 batch 進 in_progress。
+6. **送下一批前,等研究面板解鎖**(見 ## 已知陷阱 #13): 匯入成功後研究框會被「來源處理中」鎖成 `readonly`,要 `?addSource=true` 重開 + 輪詢 `source-discovery-query-box textarea` 的 `readOnly===false`(來源多時背景 sleep 3-4 分鐘再輪詢)才能 type 下一批。
 
 > 提示: 配合 `/goal 跑到結束不要停在匯入` 設一個 Stop hook,可在沒跑完 8 批+dedup 前擋住結束 turn,是最有效的「不要中途停」防呆。
 
 ### Step 4 — 全部跑完後,清重複 sources
 
-8 批跑完通常會累積 ~150 個 sources,其中 30-60 個是重複的 (同篇文章被多批抓到)。**使用 `scripts/dedup-sources.js` 的 Playwright 程式碼**,透過 `mcp__playwright__browser_run_code_unsafe` 一次跑完整個去重流程(自動偵測+刪除重複)。
+8 批跑完通常會累積 ~150 個 sources,其中 30-60 個是重複的 (同篇文章被多批抓到)。**先切到「來源」分頁讓 source list 渲染**(見 ## 已知陷阱 #14),再**使用 `scripts/dedup-sources.js` 的 Playwright 程式碼**,透過 `mcp__playwright__browser_run_code_unsafe` 一次跑完整個去重流程(自動偵測+刪除重複)。
 
 腳本會印出: 偵測到的重複群組、實際刪除數量、最終 source 總數。
 
@@ -231,6 +232,8 @@ sleep 480 && echo ready
 10. **批次間 source count 與 notebook 總數會不一致**: 個別 batch 報「找到 X 個 sources」加總,跟匯入後 notebook 的 source 總數常差 2-5 個 — NotebookLM 在匯入階段就會自動 dedupe 部分 cross-batch 重複。報告時以**匯入後的 notebook source count** 為準,而不是各批的 sum。
 11. **(財報狗 Step 1.5) 沒登入 / 非台股 → tabCount 多為 0**: `scrape-statementdog.js` 回傳的 `sections` 裡若 `tabCount` 普遍 0 或極低,代表瀏覽器沒登入財報狗(只拿得到公開的少量資料)或這檔不是台股(財報狗沒有該頁)。提示使用者登入付費帳號後重跑此步,或直接 `statementdog=off` 跳過、只跑 Deep Research。
 12. **(財報狗 Step 1.5) `run_code_unsafe` 沒有 `require`**: 不要在抓取腳本裡用 `fs`/`require` — 沙箱會丟 `require is not defined`。落地一律走「localStorage `__SD` → browser_evaluate `filename` dump → node convert」三段式。`browser_evaluate` 的 `filename` 只能存 basename 到 home 目錄(不能帶子路徑)。
+13. **(批次間最重要) 匯入後研究框會被「來源處理中」鎖住 `readonly`**: 每批 `check-and-import` 匯入成功後,NotebookLM 會在剛匯入的那批 sources **背景處理(ingest)完成前**,把 `source-discovery-query-box textarea` 設成 `readonly=true`、把「網路」corpus 鈕設成 `disabled` — 整個研究面板鎖住,**不是 `disabled` 而是 `readonly`**(所以只檢查 `.disabled` 會誤判成可用)。**送下一批前務必**: (a) `browser_navigate` 到 `?addSource=true`,(b) 用 `browser_evaluate` 輪詢 `document.querySelector('source-discovery-query-box textarea').readOnly === false` 直到解鎖(來源多時要 3-5 分鐘,背景 sleep 後重開再輪詢),(c) 解鎖後才 `browser_type` 填 prompt。沒等解鎖就 type 會 timeout(element is not editable)。注意:這個鎖跟 trap #7 的「前批未匯入→textarea disabled」是兩回事,#13 是「已匯入但 sources 還在 ingest」。
+14. **(dedup) 跑 `dedup-sources.js` 前要先切到「來源」分頁**: dedup 靠 `.single-source-container` 抓 source list,但頁面預設停在「對話」分頁時這些容器不在 DOM,腳本會回傳 `initialSources:0` 什麼都沒刪。先 `browser_evaluate` 點「來源」tab(`[role=tab]` 或 button 文字 `^來源$`)、等 ~2.5s 讓清單渲染(確認 `.single-source-container` 數量 > 0)再跑 dedup。
 
 ## 失敗與恢復
 
