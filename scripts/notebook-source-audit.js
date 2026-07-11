@@ -32,12 +32,13 @@ async (page) => {
       return { id, title };
     }).filter(s => s.id && s.title);
 
-    // IMPORTANT: match only OUR uploaded master file (title ends in 財報狗.md / 財報狗_YYYY-MM.md).
-    // Deep-Research-crawled statementdog NEWS pages also contain "財報狗" in their title but do
-    // NOT end in ".md" — they must NOT be treated as our source (or delete would nuke them).
-    const isOurFinancial = t => /財報狗(_\d{4}-\d{2})?\.md$/.test(t);
+    // IMPORTANT: match only OUR uploaded files (title ends in 財報狗.md / 財報狗_YYYY-MM.md /
+    // 財報狗AI解讀_YYYY-MM.md). Deep-Research-crawled statementdog NEWS pages also contain
+    // "財報狗" in their title but do NOT end in ".md" — they must NOT be treated as our source
+    // (or delete would nuke them).
+    const isOurFinancial = t => /財報狗(AI解讀)?(_\d{4}-\d{2})?\.md$/.test(t);
     const financialSources = sources.filter(s => isOurFinancial(s.title)).map(s => {
-      const m = s.title.match(/財報狗_(\d{4})-(\d{2})\.md$/);
+      const m = s.title.match(/財報狗(?:AI解讀)?_(\d{4})-(\d{2})\.md$/);
       return { ...s, period: m ? `${m[1]}-${m[2]}` : null };
     });
     const periods = financialSources.map(s => s.period).filter(Boolean).sort();

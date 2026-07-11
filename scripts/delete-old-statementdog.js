@@ -22,9 +22,9 @@ async (page) => {
       const titleBtn = c.querySelector('button:not([id^="source-item-more-button-"])');
       const title = titleBtn ? titleBtn.getAttribute('aria-label') : '';
       return { id: moreBtn ? moreBtn.id.replace('source-item-more-button-', '') : null, title };
-    // ONLY our uploaded master (ends in 財報狗.md / 財報狗_YYYY-MM.md) — never the Deep-Research
-    // statementdog news pages (which also contain "財報狗" but don't end in ".md").
-    }).filter(s => s.id && /財報狗(_\d{4}-\d{2})?\.md$/.test(s.title)).map(s => s.id)
+    // ONLY our uploaded files (end in 財報狗.md / 財報狗_YYYY-MM.md / 財報狗AI解讀_YYYY-MM.md)
+    // — never the Deep-Research statementdog news pages (contain "財報狗" but don't end in ".md").
+    }).filter(s => s.id && /財報狗(AI解讀)?(_\d{4}-\d{2})?\.md$/.test(s.title)).map(s => s.id)
   );
   const log = [];
   let consecutiveFailures = 0;
